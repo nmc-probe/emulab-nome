@@ -1,0 +1,216 @@
+#!/usr/bin/env perl
+
+#
+# send-month-email-now  send the monthly email now
+# 06-Nov-2014  chuck@ece.cmu.edu
+#
+
+#
+# this runs on or after the first of a new month, so it will send last
+# month's data out (i.e. the last complete month of data)
+#
+
+use strict;
+use Getopt::Std;
+use Sys::Hostname;
+$Getopt::Std::STANDARD_HELP_VERSION = 1;
+
+
+#
+# default config ($d_*)
+#
+my($d_hn, $d_indir, $d_sender, $d_reply);
+$d_indir    = "/usr/testbed/local/data";   # output from genhist/monthhist here
+$d_sender = 'probe-help@ece.cmu.edu';
+# for cc/reply-to
+$d_reply = 'Garth Gibson <garth@cs.cmu.edu>, ' .
+           'Andree Jacobson <andree@newmexicoconsortium.org>'; 
+
+$d_hn = hostname();
+$d_hn =~ s/^boss\.//;
+$d_hn =~ s/\..*//;
+
+my(%opt);
+
+#
+# getfile: load file contents into a string
+#
+sub getfile {
+    my($f) = @_;
+    my($fh, $s);
+    open($fh, "<$f") || return(undef);
+    $s = $/; undef($/); $_ = <$fh>; $/ = $s;
+    close($fh);
+    return($_);
+}
+
+#
+# sbinsendmail(\%hdrs,$body): call sendmail -t and give it the message
+# hdrs uses headers for keys
+#
+sub sbinsendmail {
+    my($hdrs, $body) = @_;
+    die "sbinsendmail: bad args" unless(ref($hdrs) eq 'HASH');
+    my(@k) = ("From", "Reply-To", "To", "Cc", "Subject");
+    my(@lines, $cmd, $ph);
+
+    # known headers go first, in the given order
+    foreach (@k) {
+        if (defined($$hdrs{$_})) {
+            push(@lines, "$_: " . $$hdrs{$_}. "\n");
+            delete($$hdrs{$_});
+        }
+    }
+
+    # add remaining misc. headers
+    foreach (keys %$hdrs) {
+        push(@lines, "$_: " . $$hdrs{$_} . "\n");
+    }
+    push(@lines, "\n");
+    push(@lines, $body);
+
+    # -d 1 means use cat instead of sendmail
+    $cmd = ($opt{'d'} eq '1') ? "|/bin/cat " : "|/usr/sbin/sendmail -t ";
+    if (open($ph, $cmd)) {
+        print $ph join('', @lines);
+    }
+    close($ph);
+}
+
+#
+# do_send_them(dbg,sndr,repl,hn,tag,linearray,foot): send the project reports
+#
+sub do_send_them {
+    my($d, $sndr, $repl, $h, $sp, $la, $foot) = @_;
+    my($i, $proj, $host, $owner, $email, @msg, $goto, $gotoadmins);
+
+    while ($i <= $#$la && $$la[$i] ne "EOF\n") {
+        $_ = $$la[$i++];
+        last unless (/^#/);
+        chop;
+        print "working on: $_\n";
+        $proj = $$la[$i++];
+        $host = $$la[$i++];
+        $owner = $$la[$i++];
+        $email = $$la[$i++];
+        chop($proj); chop($host); chop($owner); chop($email);
+        undef(@msg);
+
+        while ($i <= $#$la && $$la[$i] ne "EOT\n" && $$la[$i] ne "EOF\n") {
+            push(@msg, $$la[$i++]);
+        }
+        $i++ if ($$la[$i] eq "EOT\n");
+
+        if ($d ne '' && $d ne '1') {
+            $goto = $d;	          # so we can test without spaming admins
+            $gotoadmins = $d;
+        } else {
+            $goto = $email;
+            $gotoadmins = $repl;
+        }
+
+        sbinsendmail({ From => $sndr,
+                       To => $goto, 
+                       Cc => $gotoadmins,
+                       'Reply-To' => $repl,
+                       Subject => "$h project $proj node usage ($sp)" }, 
+                       join('', @msg) . $foot);
+        
+    }
+}
+
+#
+# usage
+#
+sub usage {
+    my($msg) = @_; 
+    print "$msg\n" if ($msg ne '');
+    print "usage: send-month-email-now [options] -y\n";
+    print "\t-d [addr] - for debug, send email only to this address\n";
+    print "\t-d 1      - for debug, don't send mail, just pipe to cat\n";
+    print "\t-f [file] - footer file for project owner emails\n";
+    print "\t-i [dir]  - input directory (def=$d_indir)\n";
+    print "\t-n [name] - cluster name (def=$d_hn)\n";
+    print "\t-r [addr] - reply to address\n";
+    print "\t            default: $d_reply\n";
+    print "\t-s [sndr] - sender (def=$d_sender)\n";
+    print "\t-y        - yes, always use this\n";
+    print "\n\n";
+    print "note: -y is to protect from sending email by mistake\n";
+    exit(1);
+}
+
+usage("") unless (getopts("d:f:i:n:r:s:y", \%opt));
+
+my($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+my($myhn, $myindir, $myreply, $mysender);
+my($dbg, $m, $y, $spec, $spec2, $footer, $msg, $goto, $fh, @lns);
+
+$dbg = $opt{'d'};
+print "send-month-email-now: debug in effect: $dbg\n" if ($dbg ne '');
+
+if ($opt{'f'} ne '') {
+    $footer = getfile($opt{'f'});
+    usage("unable to get footer file ($!)\n") if (!defined($footer));
+}
+
+$myindir = ($opt{'i'} ne '') ? $opt{'i'} : $d_indir;
+usage("bad input dir $myindir") unless (-d $myindir);
+
+$myhn = ($opt{'n'} ne '') ? $opt{'n'} : $d_hn;
+
+$myreply = ($opt{'r'} ne '') ? $opt{'r'} : $d_reply;
+
+$mysender = ($opt{'s'} ne '') ? $opt{'s'} : $d_sender;
+
+# -y is just to keep admins from accidently sending email by running
+# this without any args...
+usage() unless ($opt{'y'});
+
+# determine target month via current_month--
+$m = $mon + 1;
+$y = $year + 1900;
+
+if ($m == 1) {
+    $m = 12;
+    $y--;
+} else {
+   $m--;
+}
+$spec = sprintf "%d%02d", $y, $m;
+$spec2 = sprintf "%d.%02d", $y, $m;    # same thing, but more human readable
+
+
+#
+# first send entire monthly testbed usage to admins
+#
+unless (defined($msg = getfile("$myindir/proj/proj.$spec"))) {
+    print "$myindir/proj/proj.$spec failed ($!)\n";
+} else {
+    if ($dbg ne '' && $dbg ne '1') {
+        $goto = $dbg;
+    } else {
+        $goto = $myreply;
+    }
+    sbinsendmail({ From => $mysender,
+                   To => $goto, 
+                   Subject => "$myhn $spec2 project usage"}, 
+                   $msg );
+}
+
+#
+# now send monthly usages to each project owner
+#
+unless (open($fh, "$myindir/email/email.$spec")) {
+    print "$myindir/email/email.$spec failed ($!)\n";
+} else {
+    @lns = <$fh>;
+    close($fh);
+    if ($#lns == -1 || $lns[$#lns] ne "EOF\n") {
+        print "format error\n";
+    } else {
+        do_send_them($dbg, $mysender, $myreply, $myhn, $spec2, \@lns, $footer);
+    }
+}
+
+exit(0);

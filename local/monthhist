@@ -1,0 +1,66 @@
+#!/usr/bin/env perl
+
+#
+# monthhist  generate a monthly history
+# 06-Nov-2014  chuck@ece.cmu.edu
+#
+
+use strict;
+
+die "usage: monthhist directory tag base-year base-month command ..." 
+            if ($#ARGV  < 4);
+
+my($dir, $tag, $baseyear, $basemonth, $newcmd);
+my($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+my($cm, $cy, $nm, $ny, $lm, $ly, $range, $suffix);
+
+#
+# mstr: month string
+#
+sub mstr {
+    my($m) = @_;
+    substr("JanFebMarAprMayJunJulAugSepOctNovDec", ($m - 1) * 3, 3);
+}
+
+$dir = shift(@ARGV);
+$tag = shift(@ARGV);
+$baseyear = $cy = shift(@ARGV);
+$basemonth = $cm = shift(@ARGV);
+
+chdir($dir) || die "can't cd to $dir - $!";
+die "invalid chars in tag $tag" if ($tag =~ /\W/);
+die "bad base year" if ($baseyear < 1970);
+die "bad base month" if ($basemonth < 1 || $basemonth > 12);
+
+unless (-d $tag) {
+    mkdir($tag) || die "cannot make subdir $tag - $!";
+}
+chdir($tag) || die "cannot cd into subdir $tag - $!";
+
+$newcmd = join(" ", @ARGV);
+
+$lm = $mon + 1;
+$ly = $year + 1900;
+
+while ($cm < $lm || $cy < $ly) {
+
+    if ($cm == 12) {
+        $nm = 1;
+        $ny = $cy + 1;
+    } else {
+        $nm = $cm + 1;
+        $ny = $cy;
+    }
+
+    $range = sprintf "01-%s-%d 01-%s-%d", mstr($cm), $cy, mstr($nm), $ny;
+    $suffix = sprintf "%d%02d", $cy, $cm;
+
+    unless (-f "$tag.$suffix") {
+        print "$newcmd $range > $tag.$suffix\n";
+        $_ = system("$newcmd $range > $tag.$suffix");
+        die "command failed" if ($_);
+    }
+
+    $cm = $nm;
+    $cy = $ny;
+}

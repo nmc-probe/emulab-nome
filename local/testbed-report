@@ -1,0 +1,545 @@
+#!/usr/bin/env perl
+
+#
+# testbed-report  report on testbed usage (using data from the db)
+# 24-Oct-2014  chuck@ece.cmu.edu
+#
+
+#
+# requires additional port "devel/p5-Time-modules" for parsedate()
+#
+
+use strict;
+use Getopt::Std;
+use Sys::Hostname;
+use Time::ParseDate;
+
+use lib '/usr/testbed/lib';
+use libdb;		# for SQL access to DBQuery()/DBQueryFatal()
+
+use User;
+use Project;
+
+#
+# ask_db(starttime,endtime): query the database about experiments
+# in the given time range and return records that touch that range
+#
+# the data we want is in two seperate tables in the db:
+#
+#   experiment_stats: list of experiments over entire lifetime of testbed
+#      - exptidx: experiment index number (an id)
+#      - pid: project id
+#      - eid: experiment id
+#      - creator: user who created the experiment
+#
+#   experiment_resources: list of swapin/out/mod ops over lifetime of testbed
+#      - exptidx: experiment index (use w/experiment_stats to find owner)
+#      - pnodes: number of physical nodes allocated
+#      - swapin_time: time of swapin
+#      - swapout_time: time of swapout
+#      - swapmod_time: time of swap modification
+#
+# we use the exptidx to join experiment_stats into experiment_resources 
+# in order to match pid/eid/creator with pnode and swaptime info.
+#
+# the time info in experiment_resources has the following semantics:
+#   0. records with swapin_time == 0 are discarded since they don't
+#      relate to pnode usage
+#   1. records with swapout_time != 0 are good to use
+#   2. records with swapout_time == 0 have two possible meanings:
+#       [a] swapmod_time == 0 => means experiment is still running.
+#           when the experiment is swapped out, the testbed will come
+#           back and replace the 0 in swapout_time with a new value.
+#       [b] swapmod_time != 0 => means a running experiment was modifed.
+#           a new row for the experiment will be inserted into 
+#           experiment_resources to cover the time after the modification
+#
+# as far as usage goes, for [2a] (experiment still running) we can set
+# the end time to "now" to account for time spent so far.   for 
+# [2b] we can set the end time to "swapmod_time" for this record and let
+# the later row(s) cover the time after that.
+#
+sub ask_db {
+    my($s, $e) = @_;
+    my($c1, $c2a, $c2b, $q, $qres, $ar);
+
+    #
+    # jam all the cases into the query and we'll patch up the results later
+    #
+    $c1  = "(swapout_time != 0 and swapin_time < $e and swapout_time >= $s)";
+    $c2a = "(swapout_time = 0 and swapmod_time = 0 and swapin_time < $e)";
+    $c2b = "(swapout_time = 0 and swapmod_time != 0 " .
+            "and swapin_time < $e and swapmod_time >= $s)";
+
+    $q = "SELECT r.swapin_time,r.swapout_time,r.swapmod_time,r.pnodes," .
+                "s.exptidx,s.pid,s.pid_idx,s.eid,s.creator,s.creator_idx " .
+         "FROM experiment_resources as r " .
+         "LEFT JOIN experiment_stats as s on r.exptidx=s.exptidx " .
+         "WHERE swapin_time != 0 and ($c1 or $c2a or $c2b) " .
+         "ORDER BY swapin_time;";
+
+    $qres = DBQuery($q);
+    return(undef) unless (defined($qres));
+
+    return($qres->fetchall_arrayref());
+}
+
+#
+# findend(aref,now): find the ending time of an experiment
+#
+sub findend {
+    my($ar, $now) = @_;
+    return($$ar[1]) if ($$ar[1] > 0);    # case 1:  have swapout time
+    return($now) unless ($$ar[2] > 0);   # case 2a: still running
+    return($$ar[2]);                     # case 2b: have mod time
+}
+
+#
+# ltimestr(time,short): local time string
+#
+sub ltimestr {
+    my($time, $short) = @_;
+
+    return(timestr($short, localtime($time)));
+}
+
+#
+# timestr(short,time...): time string
+#
+sub timestr {
+    my($short, @tar) = @_;
+
+    if ($short) {
+        return(sprintf("%02d/%02d-%02d:%02d", $tar[4] + 1, 
+                       $tar[3], $tar[2], $tar[1]));
+    }
+
+    sprintf("%04d/%02d/%02d-%02d:%02d:%02d", $tar[5] + 1900,
+        $tar[4] + 1, $tar[3], $tar[2], $tar[1], $tar[0]);
+}
+
+#
+# compute_usage: compute all usage info and save in state info for later
+#
+sub compute_usage {
+    my($s, $e, $db, $sa) = @_;
+    my($event, $slotstart, $slotend, $delta, $k);
+    my(%namemap, %byproj, %byuser, %bysize);
+
+    foreach $event (@$db) {
+        my($swapin,$swapout,$swapmod,$pnodes,$exptidx,$pid,$pid_idx,
+           $eid,$creator,$creator_idx) = @$event;
+
+        $slotstart = ($swapin > $s) ? $swapin : $s;
+        $slotend = findend($event, $e);
+        $slotend = $e if ($slotend > $e);
+        $delta = $slotend - $slotstart;
+        $delta = 0 if ($delta < 0);    # to be safe
+
+        # pid/creator may not be unique (if reused?) -- use idx
+        $namemap{$pid_idx} = $pid if (!defined($namemap{$pid_idx}));
+        $k = $creator_idx . "." . $pid_idx;
+        $namemap{$k} = $creator . "." . $pid if (!defined($namemap{$k}));
+
+        $byproj{$pid_idx} += ($delta * $pnodes);
+        $byuser{$k} += ($delta * $pnodes);
+        # skip 0 allocation if pnodes == 0
+        $bysize{$pnodes} += ($delta * $pnodes) unless ($pnodes == 0);
+    }
+
+    $$sa{'u_namemap'} = \%namemap;
+    $$sa{'u_proj'} = \%byproj;
+    $$sa{'u_user'} = \%byuser;
+    $$sa{'u_size'} = \%bysize;
+}
+
+#
+# here are the report options
+#
+
+#
+# do_header: print report header
+#
+sub do_header {
+    my($fh, $key, $s, $e, $q, $sa) = @_;
+    my($short, $hn);
+    $short = 1 unless ($key eq 'lh');
+
+    $hn = hostname();
+    $hn =~ s/^boss\.//;
+    $hn =~ s/\..*//;
+
+    print $fh "$hn usage report: ", ltimestr($s, $short), " to ", 
+                                    ltimestr($e, $short), "\n\n";
+    return(0);
+}
+
+#
+# do_prior: print prior running exps and their age
+#
+sub do_prior {
+    my($fh, $key, $s, $e, $q, $sa) = @_;
+    my($ptr, $got, $str);
+
+    for ($ptr = 0 ; $ptr <= $#$q && $$q[$ptr][0] < $s ; $ptr++) {
+        print $fh "Experiments started prior to report period:\n" 
+                                                unless ($got++);
+        my($swapin,$swapout,$swapmod,$pnodes,$exptidx,$pid,$pid_idx,
+           $eid,$creator,$creator_idx) = @{$$q[$ptr]};
+        $str = "$pid.$eid by $creator";
+        printf $fh "    %-46s pnodes=%-3d hours_run=%.2f\n", $str, $pnodes,
+                   ($s - $swapin) / (60.0*60.0);
+    }
+
+    if ($got) {
+        print $fh "\n";
+    } else {
+        print $fh "Experiments started prior to report period: NONE\n\n";
+    }
+
+    return(0);
+}
+
+#
+# do_running: print exps in range that are still running and their age
+#
+sub do_running {
+    my($fh, $key, $s, $e, $q, $sa) = @_;
+    my($now, $ptr, $got, $str);
+
+    $now = time();
+    for ($ptr = 0 ; $ptr <= $#$q ; $ptr++) {
+        my($swapin,$swapout,$swapmod,$pnodes,$exptidx,$pid,$pid_idx,
+           $eid,$creator,$creator_idx) = @{$$q[$ptr]};
+        next unless ($swapout == 0 && $swapmod == 0);
+        print $fh "Experiments in range still running after report period:\n" 
+                   unless ($got);
+        $got++;
+        $str = "$pid.$eid by $creator";
+        printf $fh "    %-46s pnodes=%-3d hours_run=%.2f\n", $str, $pnodes,
+                   ($now - $swapin) / (60.0*60.0);
+    }
+
+    if ($got) {
+        print $fh "\n";
+    } else {
+        print $fh "Experiments in range still running after ",
+                  "report period: NONE\n\n";
+    }
+
+    return(0);
+}
+
+#
+# do_usage: print usage by pnode hours
+#
+sub do_usage {
+    my($fh, $key, $s, $e, $q, $sa) = @_;
+    my($src, $byutag, $usemap, $nmap, $k, $km, $got);
+
+    # only compute usage once, and save results in sa
+    &compute_usage($s, $e, $q, $sa) if (!defined($$sa{'u_proj'}));
+
+    if ($key eq 'up') {
+        $src = $$sa{'u_proj'};
+        $byutag = "project";
+        $usemap = 1;
+    } elsif ($key eq 'uu') {
+        $src = $$sa{'u_user'};
+        $byutag = "user";
+        $usemap = 1;
+    } elsif ($key eq 'us') {
+        $src = $$sa{'u_size'};
+        $byutag = "size";
+    } else {
+        print $fh "do_usage: internal error $key\n";
+        return(1);
+    }
+    $nmap = $$sa{'u_namemap'};
+
+    foreach $k (sort { $$src{$b} <=> $$src{$a} } keys %$src) {
+       if (!$got++) {
+            printf $fh "%-32s%s\n", $byutag, "pnode-hours usage";
+            print $fh "------------------------------  ",
+                       "------------------------------\n";
+       }
+       $km = ($usemap) ? $$nmap{$k} : $k;
+       printf $fh "%-32s%.2f\n", $km, $$src{$k} / (60.0 * 60.0);
+    }
+
+    if ($got) {
+        print $fh "\n";
+    } else {
+        print $fh "No usage by $byutag in specified period\n\n";
+    }
+
+    return(0);
+}
+
+#
+# do_logshort: short log
+#
+sub do_logshort {
+    my($fh, $key, $s, $e, $q, $sa) = @_;
+    my($event, $fakeend, $msg);
+ 
+    if ($#$q >= 0) {
+        print $fh "START       END         #PN HOURS   IDENTITY\n";
+        print $fh "----------- ----------- --- ------- ",
+                  "------------------------------------------\n";
+    } else {
+        print $fh "NO ACTIVITY\n";
+    }
+
+    foreach $event (@$q) {
+        my($swapin,$swapout,$swapmod,$pnodes,$exptidx,
+           $pid,$pid_idx,$eid,$creator,$creator_idx) = @$event;
+        $fakeend = findend($event, time());
+        $msg = ($swapout == 0 && $swapmod == 0) ? " (IN)" : "";
+        printf $fh "%s %s %3d %7.02f %s.%s by %s%s\n", 
+                   ltimestr($swapin, 1), ltimestr($fakeend, 1), 
+                   $pnodes, ($fakeend - $swapin) / (60.0*60.0), $pid, $eid, 
+                   $creator, $msg;
+    }
+
+    return(0);
+}
+
+#
+# do_loglong: long log
+#
+sub do_loglong {
+    my($fh, $key, $s, $e, $q, $sa) = @_;
+    my($event, $fakeend, $msg, %prev, @log, %post, $lcv);
+ 
+    foreach $event (@$q) {
+        my($swapin,$swapout,$swapmod,$pnodes,$exptidx,
+           $pid,$pid_idx,$eid,$creator,$creator_idx) = @$event;
+        $fakeend = findend($event, $e);
+
+        $msg = ltimestr($swapin) . " $pid.$eid by $creator " .
+               "active pn=$pnodes";
+        if ($swapin < $s) { 
+            $prev{"$pid.$eid"}++;
+            $msg = $msg . " (prior to start)";
+        }
+        push(@log, [$swapin, $msg]);
+
+        if ($swapout > 0) {
+            $msg = ltimestr($swapout) . 
+              " $pid.$eid by $creator halted pn=$pnodes";
+            if ($swapout > $e) {
+                $post{"$pid.$eid"}++;
+                $msg = $msg . " (past end time)";
+            } 
+            push(@log, [$swapout, $msg]);
+            next;
+        }
+
+        if ($swapmod > 0) {
+            $msg = ltimestr($swapmod) . 
+              " $pid.$eid by $creator modified pn=$pnodes";
+            if ($swapmod > $e) {
+                $post{"$pid.$eid"}++;
+                $msg = $msg . " (past end time)";
+            } 
+            push(@log, [$swapmod, $msg]);
+            next;
+        }
+
+        $post{"$pid.$eid"}++;
+        $msg = ltimestr(time()) . 
+           " $pid.$eid by $creator active pn=$pnodes (still running)";
+        push(@log, [time(), $msg]);
+
+    }
+
+    @log = sort { $$a[0] <=> $$b[0] } @log;
+    foreach $lcv (@log) {
+        print $fh $$lcv[1], "\n";
+    }
+
+    return(0);
+}
+
+#
+# alt_emailrpt: generate templates for email report
+#
+sub alt_emailrpt {
+    my($out, $s, $e, $q, $sa) = @_;
+    my($fh, $hn, $nmap, $pu, $uu, $totaltime, $lcv, $pidx, $ukey);
+    my($proj, $head);
+
+    # only compute usage once, and save results in sa
+    &compute_usage($s, $e, $q, $sa) if (!defined($$sa{'u_proj'}));
+
+    if ($out eq '-') {
+        $fh = \*STDOUT;
+    } else {
+        if (!open($fh, ">$out")) {
+            print "emailrpt: unable to open $out ($!)\n";
+            return(1);
+        }
+    }
+
+    $hn = hostname();
+    $hn =~ s/^boss\.//;
+    $hn =~ s/\..*//;
+
+    $nmap = $$sa{'u_namemap'};
+    $pu = $$sa{'u_proj'};
+    $uu = $$sa{'u_user'};
+
+    # compute total time so we can compute percentages
+    foreach $lcv (keys %$pu) {
+        $totaltime += $$pu{$lcv};
+    }
+
+    foreach $pidx (keys %$pu) {
+        $proj = Project->Lookup($pidx);
+        if (!defined($proj)) {
+            print STDERR "emailrpt: proj lookup $pidx failed\n";
+            next;
+        }
+        $head = User->Lookup($proj->head_idx());
+        if (!defined($head)) {
+            printf STDERR "emailrpt: proj head lookup %s %s failed\n",
+                    $pidx, $proj->head_idx();
+            next;
+        }
+        printf $fh "# pidx=%s pid=%s use=%d owner=%s\n", 
+                   $pidx, $$nmap{$pidx}, $$pu{$pidx}, $head->email();
+        printf $fh "%s\n%s\n%s\n%s\n\n", $$nmap{$pidx}, $hn,
+                   $head->name(), $head->email();
+
+        do_header($fh, "h", $s, $e, $q, $sa);
+
+        printf $fh "Project: %s\nOwner: %s <%s>\nTotal physical-node " .
+                   "hours used: %.02f  (%.02f%% of total cluster use)\n\n",
+                   $$nmap{$pidx}, $head->name(), $head->email(),
+                   $$pu{$pidx} / (60.0 * 60.0),
+                   100.0 * $$pu{$pidx} / $totaltime;
+
+        print $fh "Per-user details:\n\n";
+        printf $fh "  %-32s    P-Hours  Email\n", "User";
+        print $fh "  -------------------------------- ----------  ",
+                     "---------------------------------\n";
+        foreach $ukey (sort { $$uu{$b} <=> $$uu{$a} } keys %$uu) {
+            my($luser, $luseruid, $lusername, $luseremail, $combo);
+            my($uk_ui, $uk_pi) = split(/\./, $ukey);
+            next unless ($uk_pi == $pidx);   # only this project
+            $luser = User->Lookup($uk_ui);
+            if (defined($luser)) {
+                $luseruid = $luser->uid();
+                $lusername = $luser->name();
+                $luseremail = $luser->email();
+            } else {
+                $luseruid = $$nmap{$ukey};
+                $luseruid =~ s/\..*//;       # remove project
+                $lusername = $$nmap{$ukey};
+                $luseremail = $luser->email();
+            }
+            $combo = "$lusername ($luseruid)";
+            printf $fh "  %-32s %10.02f  %s\n", $combo,
+                   $$uu{$ukey} / (60.0 * 60.0), $luseremail;
+        }
+
+        print $fh "\nEOT\n";
+    }
+    print $fh "EOF\n";
+    close($fh) if ($out ne '-');
+
+}
+
+#
+# here's the main part of the script
+#
+my(@fmts, $deffmt, $lcv, $key, %fmthash, $myfmt);
+my(%opt, $rstart, $rend, $prstart, $prend, @specs, $sp, $dbq, $sv, $rv);
+my(%state);
+
+#
+# we define the valid report formats and what they map to here
+#
+@fmts = (
+   ["h,header", "report header", \&do_header],
+   ["lh,longheader", "long report header", \&do_header],
+   ["ll,loglong", "long format log", \&do_loglong],
+   ["ls,logshort", "short format log", \&do_logshort],
+   ["p,prior", "prior running", \&do_prior],
+   ["r,running", "still running", \&do_running],
+   ["up,useproj", "usage by project", \&do_usage],
+   ["us,usesize", "usage by size", \&do_usage],
+   ["uu,useuser", "usage by user", \&do_usage],
+);
+$deffmt = "h";
+
+# build quick lookup table
+foreach $lcv (@fmts) {
+    @_ = split(/,/, $$lcv[0]);
+    foreach $key (@_) {
+        $fmthash{$key} = [ $$lcv[1], $$lcv[2], $_[0] ];
+    }
+}
+
+#
+# usage
+#
+sub usage($) {
+    my($msg) = @_;
+    print "error: $msg\n\n" if ($msg ne '');
+    print "usage: testbed-report [flags] range-start [range-end]\n";
+    print "where flags are:\n";
+    print "\t-e [outfile] gen per-proj usage emails ('-' means stdout)\n";
+    print "\t-f [spec] - specify report format\n";
+    print "\t  report formats:\n";
+    foreach (@fmts) {
+        print "\t    ", $$_[0], ": ", $$_[1], "\n";
+    }
+    print "\n";
+    print "note: range-end is set to the current time if not specified.\n";
+    print "note: '-f 0' turns off all reports\n";
+    exit(1);
+}
+
+usage("") unless (getopts("e:f:", \%opt));
+usage("missing range-start arg") unless ($#ARGV >= 0);
+
+($rstart, $rend) = @ARGV;
+$rend = "now" if (!defined($rend));
+$prstart = parsedate($rstart);
+$prend = parsedate($rend);
+
+usage("bad date range spec") if (!defined($prstart) || !defined($prend));
+usage("invalid date range") if ($prstart >= $prend);
+
+$myfmt = defined($opt{'f'}) ? $opt{'f'} : $deffmt;
+undef($myfmt) if ($myfmt eq '0');
+@specs = split(/,/, $myfmt);
+foreach $sp (@specs) {
+    usage("unknown spec: $sp") unless (defined($fmthash{$sp}));
+}
+
+$dbq = ask_db($prstart, $prend);   # dbq=array of array refs
+if (!defined($dbq)) {
+    print "testbed-report: error - database query failed!\n";
+    exit(1);
+}
+
+
+#
+# generate report
+#
+foreach $sp (@specs) {
+    $sv = $fmthash{$sp};
+    $rv = &{$$sv[1]}(\*STDOUT, $$sv[2], $prstart, $prend, $dbq, \%state);
+    if ($rv) {
+        print "report error: $sp ($$sv[0])\n";
+        last;
+    }
+}
+
+$rv = alt_emailrpt($opt{'e'}, $prstart, $prend, $dbq, \%state) 
+    if ($rv ==0 && defined($opt{'e'}));
+
+exit(($rv == 0) ? 0 : -1);

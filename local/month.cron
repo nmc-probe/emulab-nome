@@ -1,0 +1,42 @@
+#!/bin/sh 
+#
+# month.cron   top-level file for generating monthly reports
+# 13-Nov-2014  chuck@ece.cmu.edu
+# 02-Apr-2015  modified by gars@newmexicoconsortium.org
+#
+
+#
+# config
+#
+cluster=nome				# human friendly cluster name
+baseyear=2014				# cluster creation year
+basemonth=8				# cluster creation month
+data=/usr/testbed/local/data		# directory where reports are stored
+foot=/usr/testbed/local/footer.current	# signature file for emails
+sender=help@nmc-probe.org		# 'From' for emails
+monthhist=/usr/testbed/local/monthhist	# path to 'monthhist' helper script
+rpt=/usr/testbed/local/testbed-report   # path to 'testbed-report' script
+
+#
+# 1. generate report files
+#
+
+# per-project leader emails
+$monthhist $data email $baseyear $basemonth $rpt -e - -f 0
+
+# overall useage by project (for admins)
+$monthhist $data proj $baseyear $basemonth $rpt -f h,up
+
+#
+# 2. send reports out (take default for -r)
+#    ADD: "-d 1" for debug output
+#
+/usr/testbed/local/send-month-email-now \
+	-f $foot \
+	-i $data \
+	-n $cluster \
+	-s $sender \
+	-y
+
+
+exit 0
