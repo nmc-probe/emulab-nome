@@ -81,7 +81,15 @@ if ($TBMAINSITE && !$ISALTDOMAIN) {
 
 ?>
 <p>
-    <em>Emulab</em> is a network testbed, giving researchers a wide range of
+    <h3>Welcome to Nome</h3>
+
+    <p>Nome is part of PRObE, an NSF-sponsored project providing a
+    large-scale, low-level systems research facility. It is a
+    collaborative effort by the New Mexico Consortium, Los Alamos National
+    Laboratory, Carnegie Mellon University, the University of Utah, and
+    the University of New Mexico.</p>
+
+    <p><em>Emulab</em> is a network testbed, giving researchers a wide range of
         environments in which to develop, debug, and evaluate their systems.
     The name Emulab refers both to a <strong>facility</strong> and to a
     <strong>software system</strong>.
@@ -90,7 +98,12 @@ if ($TBMAINSITE && !$ISALTDOMAIN) {
         <a href="http://www.flux.utah.edu">Flux Group</a>, part of the
         <a href="http://www.cs.utah.edu">School of Computing</a> at the
         <a href="http://www.utah.edu">University of Utah</a>.
-    There are also installations of the Emulab software at more than
+    Nome is a separate installation of the Emulab software operated by
+    PRObE at the <a href="http://newmexicoconsortium.org">New Mexico
+    Consortium</a>.  The Nome testbed consists of 256 nodes.
+    More information can be found at the links below:</p>
+
+    <p>There are also installations of the Emulab software at more than
         <a href="http://users.emulab.net/trac/emulab/wiki/OtherEmulabs">two
         dozen sites</a> around the world, ranging from testbeds with a handful
         of nodes up to testbeds with hundreds of nodes.

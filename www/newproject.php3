@@ -112,6 +112,9 @@ function SPITFORM($formfields, $returning, $errors)
                  Read this for more info.</a>
               </font></center><br>\n";
 
+        echo "<p>&nbsp;&nbsp;<center><font size=+1>Please start new projects at the <a href='http://portal.nmc-probe.org'>PRObE Portal</a>.</center>\n";
+
+/*
 	if (! $returning) {
 	    echo "<center><font size=+1>
                    If you already have an Emulab account,
@@ -119,8 +122,10 @@ function SPITFORM($formfields, $returning, $errors)
                    <font color=red>please log on first!</font></a>
                    </font></center><br>\n";
 	}
+*/
     }
 
+/*
     if ($errors) {
 	echo "<table class=nogrid
                      align=center border=0 cellpadding=6 cellspacing=0>
@@ -643,6 +648,7 @@ function SPITFORM($formfields, $returning, $errors)
     echo "</ol>
           </blockquote></blockquote></blockquote>
           </h4>\n";
+*/
 }
 
 #

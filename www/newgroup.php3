@@ -101,6 +101,9 @@ function SPITFORM($formfields, $errors)
 	$formfields[$key] = CleanString($val);
     }
 
+    echo "<p>&nbsp;&nbsp;<center><font size=+1>Please create groups at the <a href='https://portal.nmc-probe.org/newgroup.php3'>PRObE Portal</a>.</center>\n";
+
+/*
     echo "<br>
           <table align=center border=1> 
           <tr>
@@ -179,6 +182,7 @@ function SPITFORM($formfields, $errors)
 	     security issues</a> are discussed in the
 	     <a href='$WIKIDOCURL/Groups'>Groups Tutorial</a>.
           </center>\n";
+*/
 }
 
 #

@@ -112,6 +112,9 @@ function SPITFORM($formfields, $returning, $errors)
     else
 	PAGEHEADER("Apply for Project Membership");
 
+    echo "<p>&nbsp;<center><font size=+1>Please join projects at the <a href='http://portal.nmc-probe.org'>PRObE Portal</a>.</center>\n";
+
+/*
     if (! $returning) {
 	echo "<center>\n";
 
@@ -557,6 +560,7 @@ if (isset($finished)) {
 	  that happens.\n";
 
     PAGEFOOTER();
+*/
     return;
 }
 
