@@ -1071,7 +1071,7 @@ function PAGEBEGINNING( $title, $nobanner = 0, $nocontent = 0,
 	    else {
 		echo "height='54' ";
 		echo "src='$BASEPATH/overlay." .
-			strtolower($THISHOMEBASE) . ".gif' ";
+			strtolower($THISHOMEBASE) . ".png' ";
 	    }
 	    echo "></a>\n";
 	    echo "</td>\n";
